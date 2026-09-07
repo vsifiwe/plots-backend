@@ -2,7 +2,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib.auth.forms import ReadOnlyPasswordHashField
 
-from .models import Asset, AssetCommitment, Contribution, Member
+from .models import Asset, AssetCommitment, Contribution, Member, RNITNav, RNITPurchase
 
 
 class MemberCreationForm(forms.ModelForm):
@@ -110,6 +110,47 @@ class ContributionAdmin(admin.ModelAdmin):
         return False
 
 
+@admin.register(RNITNav)
+class RNITNavAdmin(admin.ModelAdmin):
+    list_display = ("as_of_date", "nav_per_unit", "recorded_by", "created_at")
+    list_filter = ("as_of_date",)
+    search_fields = ("recorded_by__full_name",)
+    readonly_fields = ("recorded_by", "created_at")
+
+    def save_model(self, request, obj, form, change):
+        if not change and not obj.recorded_by_id:
+            obj.recorded_by = request.user
+        super().save_model(request, obj, form, change)
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(RNITPurchase)
+class RNITPurchaseAdmin(admin.ModelAdmin):
+    list_display = ("member", "contribution", "purchased_on", "nav_per_unit", "units", "is_active")
+    list_filter = ("purchased_on", "reversed_at")
+    search_fields = ("member__full_name", "contribution__id")
+    readonly_fields = (
+        "contribution",
+        "member",
+        "purchased_on",
+        "nav_per_unit",
+        "units",
+        "recorded_by",
+        "created_at",
+        "reversed_at",
+        "reversed_by",
+        "reversal_reason",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
 class AssetCommitmentInline(admin.TabularInline):
     model = AssetCommitment
     extra = 0
@@ -121,6 +162,12 @@ class AssetCommitmentInline(admin.TabularInline):
         "released_at",
         "released_by",
         "release_reason",
+        "reserved_cash",
+        "reserved_units",
+        "reservation_nav",
+        "redeemed_at",
+        "redeemed_by",
+        "redemption_nav",
     )
 
 
@@ -135,6 +182,9 @@ class AssetAdmin(admin.ModelAdmin):
         "cancelled_at",
         "cancelled_by",
         "cancellation_reason",
+        "reopened_at",
+        "reopened_by",
+        "reopen_reason",
     )
     inlines = (AssetCommitmentInline,)
 
@@ -146,7 +196,7 @@ class AssetAdmin(admin.ModelAdmin):
 
 @admin.register(AssetCommitment)
 class AssetCommitmentAdmin(admin.ModelAdmin):
-    list_display = ("asset", "member", "amount", "reserved_at", "released_at")
+    list_display = ("asset", "member", "amount", "reserved_cash", "reserved_units", "reserved_at", "released_at", "redeemed_at")
     list_filter = ("reserved_at", "released_at")
     search_fields = ("asset__title", "member__full_name")
     readonly_fields = (
@@ -156,4 +206,10 @@ class AssetCommitmentAdmin(admin.ModelAdmin):
         "released_at",
         "released_by",
         "release_reason",
+        "reserved_cash",
+        "reserved_units",
+        "reservation_nav",
+        "redeemed_at",
+        "redeemed_by",
+        "redemption_nav",
     )

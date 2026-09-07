@@ -1,3 +1,5 @@
+from decimal import Decimal, ROUND_UP
+
 from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.password_validation import validate_password
@@ -12,7 +14,16 @@ from .models import (
     Asset,
     AssetCommitment,
     Contribution,
+    RNITNav,
+    RNITPurchase,
+    get_active_reserved_cash,
+    get_active_reserved_units,
+    get_latest_rnit_nav,
+    get_member_available_cash,
     get_member_available_balance,
+    get_member_available_units,
+    get_member_pending_cash,
+    get_member_total_units,
     phone_validator,
 )
 
@@ -121,6 +132,7 @@ class ContributionSerializer(serializers.ModelSerializer):
     void_reason = serializers.SerializerMethodField()
     recorded_by = serializers.SerializerMethodField()
     voided_by = serializers.SerializerMethodField()
+    rnit_status = serializers.SerializerMethodField()
 
     def can_manage_contributions(self):
         request = self.context.get("request")
@@ -167,6 +179,12 @@ class ContributionSerializer(serializers.ModelSerializer):
             "full_name": contribution.voided_by.full_name,
         }
 
+    def get_rnit_status(self, contribution):
+        purchases = contribution.rnit_purchases.all()
+        if any(purchase.is_active for purchase in purchases):
+            return "invested"
+        return "purchase_reversed" if purchases else "pending_cash"
+
     class Meta:
         model = Contribution
         fields = (
@@ -181,6 +199,7 @@ class ContributionSerializer(serializers.ModelSerializer):
             "voided_at",
             "void_reason",
             "voided_by",
+            "rnit_status",
         )
 
 
@@ -230,8 +249,12 @@ class AssetCommitmentInputSerializer(serializers.Serializer):
     amount = serializers.IntegerField(min_value=1)
 
 
+def current_asset_commitments(asset):
+    return asset.commitments.filter(is_current=True).select_related("member")
+
+
 def get_asset_funding_issues(asset):
-    commitments = list(asset.commitments.select_related("member").all())
+    commitments = list(current_asset_commitments(asset))
     committed_total = sum(commitment.amount for commitment in commitments)
     issues = []
 
@@ -245,8 +268,13 @@ def get_asset_funding_issues(asset):
             }
         )
 
+    nav = get_latest_rnit_nav()
     for commitment in commitments:
-        available_balance = get_member_available_balance(commitment.member_id)
+        available_cash = get_member_available_cash(commitment.member_id)
+        available_units = get_member_available_units(commitment.member_id)
+        available_balance = available_cash + (
+            available_units * nav.nav_per_unit if nav else Decimal("0")
+        )
         if commitment.amount > available_balance:
             issues.append(
                 {
@@ -259,8 +287,36 @@ def get_asset_funding_issues(asset):
                     "available_balance": available_balance,
                 }
             )
+        elif commitment.amount > available_cash and nav is None:
+            issues.append(
+                {
+                    "type": "nav_required",
+                    "message": "Record a current RNIT NAV before reserving invested funds.",
+                }
+            )
 
     return issues
+
+
+def allocate_commitment_reserve(commitment, nav):
+    available_cash = get_member_available_cash(commitment.member_id)
+    reserved_cash = min(Decimal(commitment.amount), available_cash)
+    remaining = Decimal(commitment.amount) - reserved_cash
+    reserved_units = Decimal("0")
+    reservation_nav = None
+    if remaining:
+        if nav is None:
+            raise serializers.ValidationError("A current RNIT NAV is required.")
+        reserved_units = (remaining / nav.nav_per_unit).quantize(
+            Decimal("0.00000001"), rounding=ROUND_UP
+        )
+        if reserved_units > get_member_available_units(commitment.member_id):
+            raise serializers.ValidationError("The member no longer has enough available RNIT units.")
+        reservation_nav = nav.nav_per_unit
+
+    commitment.reserved_cash = int(reserved_cash)
+    commitment.reserved_units = reserved_units
+    commitment.reservation_nav = reservation_nav
 
 
 class AssetWriteSerializer(serializers.Serializer):
@@ -312,7 +368,7 @@ class AssetWriteSerializer(serializers.Serializer):
         asset.total_cost = validated_data["total_cost"]
         asset.save(update_fields=("title", "description", "total_cost", "updated_at"))
 
-        asset.commitments.all().delete()
+        asset.commitments.filter(is_current=True).update(is_current=False)
         AssetCommitment.objects.bulk_create(
             [
                 AssetCommitment(
@@ -330,6 +386,7 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
     member = serializers.SerializerMethodField()
     ownership_percentage = serializers.SerializerMethodField()
     is_reserved = serializers.BooleanField(read_only=True)
+    live_reserved_value = serializers.SerializerMethodField()
 
     def get_member(self, commitment):
         return {
@@ -339,6 +396,12 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
 
     def get_ownership_percentage(self, commitment):
         return round((commitment.amount / commitment.asset.total_cost) * 100, 2)
+
+    def get_live_reserved_value(self, commitment):
+        nav = get_latest_rnit_nav()
+        return commitment.reserved_cash + float(
+            commitment.reserved_units * (nav.nav_per_unit if nav else Decimal("0"))
+        )
 
     class Meta:
         model = AssetCommitment
@@ -352,6 +415,12 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
             "reserved_at",
             "released_at",
             "release_reason",
+            "reserved_cash",
+            "reserved_units",
+            "reservation_nav",
+            "redeemed_at",
+            "redemption_nav",
+            "live_reserved_value",
         )
 
 
@@ -375,14 +444,21 @@ class AssetSerializer(serializers.ModelSerializer):
         return fields
 
     def get_commitments_for_asset(self, asset):
-        return list(asset.commitments.select_related("member", "asset").all())
+        return list(
+            asset.commitments.filter(is_current=True).select_related("member", "asset")
+        )
 
     def get_total_committed(self, asset):
         return sum(commitment.amount for commitment in self.get_commitments_for_asset(asset))
 
     def get_total_reserved(self, asset):
+        nav = get_latest_rnit_nav()
         return sum(
-            commitment.amount
+            float(
+                Decimal(commitment.reserved_cash)
+                + commitment.reserved_units
+                * (nav.nav_per_unit if nav else Decimal("0"))
+            )
             for commitment in self.get_commitments_for_asset(asset)
             if commitment.is_reserved
         )
@@ -391,9 +467,9 @@ class AssetSerializer(serializers.ModelSerializer):
         request = self.context.get("request")
         if not request:
             return None
-        commitment = asset.commitments.select_related("member", "asset").filter(
-            member=request.user
-        ).first()
+        commitment = asset.commitments.filter(
+            is_current=True, member=request.user
+        ).select_related("member", "asset").first()
         if commitment is None:
             return None
         data = AssetCommitmentSerializer(commitment).data
@@ -436,6 +512,98 @@ class AssetCancelSerializer(serializers.Serializer):
     def validate_reason(self, value):
         if not value:
             raise serializers.ValidationError("Enter a reason for cancelling this asset.")
+        return value
+
+
+class AssetReopenSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=500, trim_whitespace=True)
+
+    def validate_reason(self, value):
+        if not value:
+            raise serializers.ValidationError("Enter a reason for reopening this asset.")
+        return value
+
+
+class RNITNavSerializer(serializers.ModelSerializer):
+    recorded_by = serializers.SerializerMethodField()
+
+    def get_recorded_by(self, nav):
+        return {"id": nav.recorded_by_id, "full_name": nav.recorded_by.full_name}
+
+    class Meta:
+        model = RNITNav
+        fields = ("id", "as_of_date", "nav_per_unit", "recorded_by", "created_at")
+
+
+class RNITNavCreateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RNITNav
+        fields = ("as_of_date", "nav_per_unit")
+
+    def validate_as_of_date(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The NAV date cannot be in the future.")
+        return value
+
+    def create(self, validated_data):
+        return RNITNav.objects.create(
+            recorded_by=self.context["request"].user,
+            **validated_data,
+        )
+
+
+class RNITPurchaseSerializer(serializers.ModelSerializer):
+    member = serializers.SerializerMethodField()
+    contribution_id = serializers.IntegerField(read_only=True)
+    status = serializers.SerializerMethodField()
+
+    def get_member(self, purchase):
+        return {"id": purchase.member_id, "full_name": purchase.member.full_name}
+
+    def get_status(self, purchase):
+        return "reversed" if not purchase.is_active else "invested"
+
+    class Meta:
+        model = RNITPurchase
+        fields = (
+            "id",
+            "contribution_id",
+            "member",
+            "purchased_on",
+            "nav_per_unit",
+            "units",
+            "status",
+            "created_at",
+            "reversed_at",
+            "reversal_reason",
+        )
+
+
+class RNITPurchaseCreateSerializer(serializers.Serializer):
+    purchased_on = serializers.DateField()
+    nav_id = serializers.PrimaryKeyRelatedField(
+        source="nav", queryset=RNITNav.objects.all()
+    )
+
+    def validate_purchased_on(self, value):
+        if value > timezone.localdate():
+            raise serializers.ValidationError("The purchase date cannot be in the future.")
+        return value
+
+    def validate(self, attrs):
+        if attrs["nav"].as_of_date > attrs["purchased_on"]:
+            raise serializers.ValidationError(
+                {"nav_id": "Choose a NAV dated on or before the purchase date."}
+            )
+        return attrs
+
+
+class RNITPurchaseReverseSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=500, trim_whitespace=True)
+
+    def validate_reason(self, value):
+        if not value:
+            raise serializers.ValidationError("Enter a reason for reversing this purchase.")
         return value
 
 

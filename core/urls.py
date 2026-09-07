@@ -24,9 +24,16 @@ from app.views import (
     AssetDetailView,
     AssetListCreateView,
     AssetOpenView,
+    AssetReopenView,
     ContributionListCreateView,
     ContributionVoidView,
     MemberListCreateView,
+    RNITNavListCreateView,
+    RNITPendingContributionView,
+    RNITPurchaseCreateView,
+    RNITPurchaseListView,
+    RNITPurchaseReverseView,
+    SavingsSummaryView,
 )
 
 urlpatterns = [
@@ -47,6 +54,13 @@ urlpatterns = [
     path("api/assets/available-balances/", AssetAvailableBalanceView.as_view(), name="asset-available-balances"),
     path("api/assets/<int:asset_id>/", AssetDetailView.as_view(), name="asset-detail"),
     path("api/assets/<int:asset_id>/open/", AssetOpenView.as_view(), name="asset-open"),
+    path("api/assets/<int:asset_id>/reopen/", AssetReopenView.as_view(), name="asset-reopen"),
     path("api/assets/<int:asset_id>/acquire/", AssetAcquireView.as_view(), name="asset-acquire"),
     path("api/assets/<int:asset_id>/cancel/", AssetCancelView.as_view(), name="asset-cancel"),
+    path("api/savings/summary/", SavingsSummaryView.as_view(), name="savings-summary"),
+    path("api/savings/navs/", RNITNavListCreateView.as_view(), name="rnit-nav-list-create"),
+    path("api/savings/pending-contributions/", RNITPendingContributionView.as_view(), name="rnit-pending-contributions"),
+    path("api/savings/purchases/", RNITPurchaseListView.as_view(), name="rnit-purchase-list"),
+    path("api/savings/contributions/<int:contribution_id>/purchase/", RNITPurchaseCreateView.as_view(), name="rnit-purchase-create"),
+    path("api/savings/purchases/<int:purchase_id>/reverse/", RNITPurchaseReverseView.as_view(), name="rnit-purchase-reverse"),
 ]

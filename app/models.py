@@ -3,6 +3,8 @@ from django.contrib.auth.models import PermissionsMixin
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
+from decimal import Decimal
+
 from django.db.models import Q, Sum
 from django.db.models.functions import Lower
 from django.utils import timezone
@@ -163,15 +165,15 @@ class Contribution(models.Model):
         if self.is_voided:
             raise ValidationError("This contribution has already been voided.")
 
-        remaining_contributions = (
-            Contribution.objects.filter(member=self.member, voided_at__isnull=True)
-            .exclude(pk=self.pk)
-            .aggregate(total=Sum("amount"))["total"]
-            or 0
-        )
-        if remaining_contributions < get_active_commitment_total(self.member_id):
+        if self.rnit_purchases.filter(reversed_at__isnull=True).exists():
             raise ValidationError(
-                "This contribution cannot be voided because funds are reserved for an active asset."
+                "This contribution has been converted into RNIT units and must be corrected by reversing that purchase."
+            )
+
+        remaining_cash = get_member_pending_cash(self.member_id, exclude_id=self.pk)
+        if remaining_cash < get_active_reserved_cash(self.member_id):
+            raise ValidationError(
+                "This contribution cannot be voided because pending cash is reserved for an active asset."
             )
 
         self.voided_at = timezone.now()
@@ -182,6 +184,113 @@ class Contribution(models.Model):
 
     def __str__(self):
         return f"{self.member.full_name} · {self.amount} RWF"
+
+
+class RNITNav(models.Model):
+    as_of_date = models.DateField(unique=True, db_index=True)
+    nav_per_unit = models.DecimalField(max_digits=20, decimal_places=8)
+    recorded_by = models.ForeignKey(
+        Member,
+        on_delete=models.PROTECT,
+        related_name="recorded_rnit_navs",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-as_of_date", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(nav_per_unit__gt=0),
+                name="rnit_nav_is_positive",
+            )
+        ]
+
+    def __str__(self):
+        return f"RNIT NAV · {self.as_of_date} · {self.nav_per_unit}"
+
+
+class RNITPurchase(models.Model):
+    contribution = models.ForeignKey(
+        Contribution,
+        on_delete=models.PROTECT,
+        related_name="rnit_purchases",
+    )
+    member = models.ForeignKey(
+        Member,
+        on_delete=models.PROTECT,
+        related_name="rnit_purchases",
+    )
+    purchased_on = models.DateField(db_index=True)
+    nav_per_unit = models.DecimalField(max_digits=20, decimal_places=8)
+    units = models.DecimalField(max_digits=24, decimal_places=8)
+    recorded_by = models.ForeignKey(
+        Member,
+        on_delete=models.PROTECT,
+        related_name="recorded_rnit_purchases",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    reversed_at = models.DateTimeField(blank=True, null=True)
+    reversed_by = models.ForeignKey(
+        Member,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="reversed_rnit_purchases",
+    )
+    reversal_reason = models.TextField(blank=True, max_length=500)
+
+    class Meta:
+        ordering = ("-purchased_on", "-created_at", "-id")
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(nav_per_unit__gt=0),
+                name="rnit_purchase_nav_is_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(units__gt=0),
+                name="rnit_purchase_units_are_positive",
+            ),
+            models.UniqueConstraint(
+                fields=("contribution",),
+                condition=Q(reversed_at__isnull=True),
+                name="rnit_one_active_purchase_per_contribution",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        reversed_at__isnull=True,
+                        reversed_by__isnull=True,
+                        reversal_reason="",
+                    )
+                    | (
+                        Q(reversed_at__isnull=False, reversed_by__isnull=False)
+                        & ~Q(reversal_reason="")
+                    )
+                ),
+                name="rnit_purchase_reversal_requires_audit",
+            ),
+        ]
+
+    @property
+    def is_active(self):
+        return self.reversed_at is None
+
+    def reverse(self, *, by_member, reason):
+        if not self.is_active:
+            raise ValidationError("This RNIT purchase has already been reversed.")
+        if get_member_available_units(self.member_id) < self.units:
+            raise ValidationError(
+                "This RNIT purchase cannot be reversed because some of its units are reserved or have funded an acquired asset."
+            )
+
+        self.reversed_at = timezone.now()
+        self.reversed_by = by_member
+        self.reversal_reason = reason
+        self.full_clean()
+        self.save(update_fields=("reversed_at", "reversed_by", "reversal_reason"))
+
+    def __str__(self):
+        return f"{self.member.full_name} · {self.units} RNIT units"
 
 
 class Asset(models.Model):
@@ -215,6 +324,15 @@ class Asset(models.Model):
         related_name="cancelled_assets",
     )
     cancellation_reason = models.TextField(blank=True, max_length=500)
+    reopened_at = models.DateTimeField(blank=True, null=True)
+    reopened_by = models.ForeignKey(
+        Member,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="reopened_assets",
+    )
+    reopen_reason = models.TextField(blank=True, max_length=500)
 
     class Meta:
         ordering = ("-created_at", "-id")
@@ -258,6 +376,7 @@ class AssetCommitment(models.Model):
         related_name="asset_commitments",
     )
     amount = models.PositiveBigIntegerField()
+    is_current = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
     reserved_at = models.DateTimeField(blank=True, null=True)
@@ -270,16 +389,45 @@ class AssetCommitment(models.Model):
         related_name="released_asset_commitments",
     )
     release_reason = models.TextField(blank=True, max_length=500)
+    reserved_cash = models.PositiveBigIntegerField(default=0)
+    reserved_units = models.DecimalField(
+        default=Decimal("0"), max_digits=24, decimal_places=8
+    )
+    reservation_nav = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=20,
+        decimal_places=8,
+    )
+    redeemed_at = models.DateTimeField(blank=True, null=True)
+    redeemed_by = models.ForeignKey(
+        Member,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="redeemed_asset_commitments",
+    )
+    redemption_nav = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=20,
+        decimal_places=8,
+    )
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
                 fields=("asset", "member"),
+                condition=Q(is_current=True),
                 name="asset_one_commitment_per_member",
             ),
             models.CheckConstraint(
                 condition=Q(amount__gt=0),
                 name="asset_commitment_amount_is_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(reserved_units__gte=0),
+                name="asset_commitment_reserved_units_are_not_negative",
             ),
             models.CheckConstraint(
                 condition=(
@@ -299,7 +447,14 @@ class AssetCommitment(models.Model):
 
     @property
     def is_reserved(self):
-        return self.reserved_at is not None and self.released_at is None
+        return (
+            self.reserved_at is not None
+            and self.released_at is None
+            and self.redeemed_at is None
+        )
+
+    def reserved_value(self, nav):
+        return Decimal(self.reserved_cash) + (self.reserved_units * nav)
 
     def release(self, *, by_member, reason):
         if not self.is_reserved:
@@ -313,6 +468,18 @@ class AssetCommitment(models.Model):
             update_fields=("released_at", "released_by", "release_reason", "updated_at")
         )
 
+    def redeem(self, *, by_member, nav):
+        if not self.is_reserved:
+            raise ValidationError("This asset commitment is not available to redeem.")
+
+        self.redeemed_at = timezone.now()
+        self.redeemed_by = by_member
+        self.redemption_nav = nav
+        self.full_clean()
+        self.save(
+            update_fields=("redeemed_at", "redeemed_by", "redemption_nav", "updated_at")
+        )
+
     def __str__(self):
         return f"{self.asset.title} · {self.member.full_name} · {self.amount} RWF"
 
@@ -321,18 +488,90 @@ def get_active_commitment_total(member_id):
     return (
         AssetCommitment.objects.filter(
             member_id=member_id,
-            asset__status__in=(Asset.Status.OPEN, Asset.Status.ACQUIRED),
+            asset__status=Asset.Status.OPEN,
+            is_current=True,
             reserved_at__isnull=False,
             released_at__isnull=True,
+            redeemed_at__isnull=True,
         ).aggregate(total=Sum("amount"))["total"]
         or 0
     )
 
 
-def get_member_available_balance(member_id):
-    contributions = (
-        Contribution.objects.filter(member_id=member_id, voided_at__isnull=True)
-        .aggregate(total=Sum("amount"))["total"]
+def get_latest_rnit_nav():
+    return RNITNav.objects.order_by("-as_of_date", "-id").first()
+
+
+def get_member_pending_cash(member_id, *, exclude_id=None):
+    contributions = Contribution.objects.filter(member_id=member_id, voided_at__isnull=True)
+    if exclude_id is not None:
+        contributions = contributions.exclude(pk=exclude_id)
+
+    total = Decimal("0")
+    for contribution in contributions.prefetch_related("rnit_purchases"):
+        has_active_purchase = any(
+            purchase.is_active for purchase in contribution.rnit_purchases.all()
+        )
+        if not has_active_purchase:
+            total += Decimal(contribution.amount)
+    return total
+
+
+def get_member_total_units(member_id):
+    purchased_units = (
+        RNITPurchase.objects.filter(member_id=member_id, reversed_at__isnull=True)
+        .aggregate(total=Sum("units"))["total"]
+        or Decimal("0")
+    )
+    redeemed_units = (
+        AssetCommitment.objects.filter(
+            member_id=member_id,
+            redeemed_at__isnull=False,
+        ).aggregate(total=Sum("reserved_units"))["total"]
+        or Decimal("0")
+    )
+    return purchased_units - redeemed_units
+
+
+def get_active_reserved_cash(member_id):
+    return (
+        AssetCommitment.objects.filter(
+            member_id=member_id,
+            asset__status=Asset.Status.OPEN,
+            is_current=True,
+            reserved_at__isnull=False,
+            released_at__isnull=True,
+            redeemed_at__isnull=True,
+        ).aggregate(total=Sum("reserved_cash"))["total"]
         or 0
     )
-    return contributions - get_active_commitment_total(member_id)
+
+
+def get_active_reserved_units(member_id):
+    return (
+        AssetCommitment.objects.filter(
+            member_id=member_id,
+            asset__status=Asset.Status.OPEN,
+            is_current=True,
+            reserved_at__isnull=False,
+            released_at__isnull=True,
+            redeemed_at__isnull=True,
+        ).aggregate(total=Sum("reserved_units"))["total"]
+        or Decimal("0")
+    )
+
+
+def get_member_available_cash(member_id):
+    return get_member_pending_cash(member_id) - Decimal(get_active_reserved_cash(member_id))
+
+
+def get_member_available_units(member_id):
+    return get_member_total_units(member_id) - get_active_reserved_units(member_id)
+
+
+def get_member_available_balance(member_id):
+    nav = get_latest_rnit_nav()
+    available = get_member_available_cash(member_id)
+    if nav:
+        available += get_member_available_units(member_id) * nav.nav_per_unit
+    return available
