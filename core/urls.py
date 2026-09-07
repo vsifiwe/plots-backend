@@ -17,7 +17,17 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
-from app.views import ContributionListCreateView, ContributionVoidView, MemberListCreateView
+from app.views import (
+    AssetAcquireView,
+    AssetAvailableBalanceView,
+    AssetCancelView,
+    AssetDetailView,
+    AssetListCreateView,
+    AssetOpenView,
+    ContributionListCreateView,
+    ContributionVoidView,
+    MemberListCreateView,
+)
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -33,4 +43,10 @@ urlpatterns = [
         ContributionVoidView.as_view(),
         name="contribution-void",
     ),
+    path("api/assets/", AssetListCreateView.as_view(), name="asset-list-create"),
+    path("api/assets/available-balances/", AssetAvailableBalanceView.as_view(), name="asset-available-balances"),
+    path("api/assets/<int:asset_id>/", AssetDetailView.as_view(), name="asset-detail"),
+    path("api/assets/<int:asset_id>/open/", AssetOpenView.as_view(), name="asset-open"),
+    path("api/assets/<int:asset_id>/acquire/", AssetAcquireView.as_view(), name="asset-acquire"),
+    path("api/assets/<int:asset_id>/cancel/", AssetCancelView.as_view(), name="asset-cancel"),
 ]

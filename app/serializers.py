@@ -8,7 +8,13 @@ from rest_framework import serializers
 from rest_framework.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import Contribution, phone_validator
+from .models import (
+    Asset,
+    AssetCommitment,
+    Contribution,
+    get_member_available_balance,
+    phone_validator,
+)
 
 
 Member = get_user_model()
@@ -214,6 +220,222 @@ class ContributionVoidSerializer(serializers.Serializer):
     def validate_reason(self, value):
         if not value:
             raise serializers.ValidationError("Enter a reason for voiding this entry.")
+        return value
+
+
+class AssetCommitmentInputSerializer(serializers.Serializer):
+    member = serializers.PrimaryKeyRelatedField(
+        queryset=Member.objects.filter(is_active=True)
+    )
+    amount = serializers.IntegerField(min_value=1)
+
+
+def get_asset_funding_issues(asset):
+    commitments = list(asset.commitments.select_related("member").all())
+    committed_total = sum(commitment.amount for commitment in commitments)
+    issues = []
+
+    if committed_total != asset.total_cost:
+        issues.append(
+            {
+                "type": "cost_mismatch",
+                "message": "Commitments must total exactly to the asset cost.",
+                "committed_total": committed_total,
+                "total_cost": asset.total_cost,
+            }
+        )
+
+    for commitment in commitments:
+        available_balance = get_member_available_balance(commitment.member_id)
+        if commitment.amount > available_balance:
+            issues.append(
+                {
+                    "type": "insufficient_balance",
+                    "member": {
+                        "id": commitment.member_id,
+                        "full_name": commitment.member.full_name,
+                    },
+                    "required": commitment.amount,
+                    "available_balance": available_balance,
+                }
+            )
+
+    return issues
+
+
+class AssetWriteSerializer(serializers.Serializer):
+    title = serializers.CharField(max_length=160, trim_whitespace=True)
+    description = serializers.CharField(
+        max_length=2000,
+        required=False,
+        allow_blank=True,
+        trim_whitespace=True,
+    )
+    total_cost = serializers.IntegerField(min_value=1)
+    commitments = AssetCommitmentInputSerializer(many=True)
+
+    def validate_title(self, value):
+        if not value:
+            raise serializers.ValidationError("Enter an asset title.")
+        return value
+
+    def validate(self, attrs):
+        member_ids = [commitment["member"].id for commitment in attrs["commitments"]]
+        if len(member_ids) != len(set(member_ids)):
+            raise serializers.ValidationError(
+                {"commitments": "Add each member only once."}
+            )
+        return attrs
+
+    def create(self, validated_data):
+        commitments = validated_data.pop("commitments")
+        asset = Asset.objects.create(
+            created_by=self.context["request"].user,
+            **validated_data,
+        )
+        AssetCommitment.objects.bulk_create(
+            [
+                AssetCommitment(
+                    asset=asset,
+                    member=commitment["member"],
+                    amount=commitment["amount"],
+                )
+                for commitment in commitments
+            ]
+        )
+        return asset
+
+    def update(self, asset, validated_data):
+        commitments = validated_data.pop("commitments")
+        asset.title = validated_data["title"]
+        asset.description = validated_data.get("description", "")
+        asset.total_cost = validated_data["total_cost"]
+        asset.save(update_fields=("title", "description", "total_cost", "updated_at"))
+
+        asset.commitments.all().delete()
+        AssetCommitment.objects.bulk_create(
+            [
+                AssetCommitment(
+                    asset=asset,
+                    member=commitment["member"],
+                    amount=commitment["amount"],
+                )
+                for commitment in commitments
+            ]
+        )
+        return asset
+
+
+class AssetCommitmentSerializer(serializers.ModelSerializer):
+    member = serializers.SerializerMethodField()
+    ownership_percentage = serializers.SerializerMethodField()
+    is_reserved = serializers.BooleanField(read_only=True)
+
+    def get_member(self, commitment):
+        return {
+            "id": commitment.member_id,
+            "full_name": commitment.member.full_name,
+        }
+
+    def get_ownership_percentage(self, commitment):
+        return round((commitment.amount / commitment.asset.total_cost) * 100, 2)
+
+    class Meta:
+        model = AssetCommitment
+        fields = (
+            "id",
+            "member",
+            "amount",
+            "ownership_percentage",
+            "is_reserved",
+            "created_at",
+            "reserved_at",
+            "released_at",
+            "release_reason",
+        )
+
+
+class AssetSerializer(serializers.ModelSerializer):
+    total_committed = serializers.SerializerMethodField()
+    total_reserved = serializers.SerializerMethodField()
+    your_commitment = serializers.SerializerMethodField()
+    commitments = serializers.SerializerMethodField()
+    funding_issues = serializers.SerializerMethodField()
+
+    def can_manage_assets(self):
+        request = self.context.get("request")
+        return bool(request and request.user.can_manage_members)
+
+    def get_fields(self):
+        fields = super().get_fields()
+        if not self.can_manage_assets():
+            fields.pop("commitments")
+            fields.pop("funding_issues")
+            fields.pop("cancellation_reason")
+        return fields
+
+    def get_commitments_for_asset(self, asset):
+        return list(asset.commitments.select_related("member", "asset").all())
+
+    def get_total_committed(self, asset):
+        return sum(commitment.amount for commitment in self.get_commitments_for_asset(asset))
+
+    def get_total_reserved(self, asset):
+        return sum(
+            commitment.amount
+            for commitment in self.get_commitments_for_asset(asset)
+            if commitment.is_reserved
+        )
+
+    def get_your_commitment(self, asset):
+        request = self.context.get("request")
+        if not request:
+            return None
+        commitment = asset.commitments.select_related("member", "asset").filter(
+            member=request.user
+        ).first()
+        if commitment is None:
+            return None
+        data = AssetCommitmentSerializer(commitment).data
+        data.pop("release_reason")
+        return data
+
+    def get_commitments(self, asset):
+        return AssetCommitmentSerializer(
+            self.get_commitments_for_asset(asset), many=True
+        ).data
+
+    def get_funding_issues(self, asset):
+        if asset.status != Asset.Status.DRAFT:
+            return []
+        return get_asset_funding_issues(asset)
+
+    class Meta:
+        model = Asset
+        fields = (
+            "id",
+            "title",
+            "description",
+            "total_cost",
+            "status",
+            "total_committed",
+            "total_reserved",
+            "your_commitment",
+            "commitments",
+            "funding_issues",
+            "created_at",
+            "updated_at",
+            "cancelled_at",
+            "cancellation_reason",
+        )
+
+
+class AssetCancelSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=500, trim_whitespace=True)
+
+    def validate_reason(self, value):
+        if not value:
+            raise serializers.ValidationError("Enter a reason for cancelling this asset.")
         return value
 
 

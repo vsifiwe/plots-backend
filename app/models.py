@@ -226,13 +226,13 @@ class Asset(models.Model):
             models.CheckConstraint(
                 condition=(
                     Q(
-                        status=Status.CANCELLED,
+                        status="cancelled",
                         cancelled_at__isnull=False,
                         cancelled_by__isnull=False,
                     )
                     & ~Q(cancellation_reason="")
                     | Q(
-                        ~Q(status=Status.CANCELLED),
+                        ~Q(status="cancelled"),
                         cancelled_at__isnull=True,
                         cancelled_by__isnull=True,
                         cancellation_reason="",
