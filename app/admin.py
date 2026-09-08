@@ -2,7 +2,7 @@ from django import forms
 from django.contrib import admin
 from django.contrib.auth.forms import ReadOnlyPasswordHashField
 
-from .models import Asset, AssetCommitment, Contribution, Member, RNITNav, RNITPurchase
+from .models import Asset, AssetCommitment, AssetValuation, Contribution, Member, RNITNav, RNITPurchase
 
 
 class MemberCreationForm(forms.ModelForm):
@@ -173,8 +173,8 @@ class AssetCommitmentInline(admin.TabularInline):
 
 @admin.register(Asset)
 class AssetAdmin(admin.ModelAdmin):
-    list_display = ("title", "total_cost", "status", "created_by", "created_at")
-    list_filter = ("status", "created_at")
+    list_display = ("title", "asset_type", "total_cost", "status", "created_by", "created_at")
+    list_filter = ("asset_type", "status", "created_at")
     search_fields = ("title", "description", "created_by__full_name")
     readonly_fields = (
         "created_at",
@@ -185,6 +185,9 @@ class AssetAdmin(admin.ModelAdmin):
         "reopened_at",
         "reopened_by",
         "reopen_reason",
+        "acquired_at",
+        "acquired_units",
+        "acquisition_unit_price",
     )
     inlines = (AssetCommitmentInline,)
 
@@ -213,3 +216,17 @@ class AssetCommitmentAdmin(admin.ModelAdmin):
         "redeemed_by",
         "redemption_nav",
     )
+
+
+@admin.register(AssetValuation)
+class AssetValuationAdmin(admin.ModelAdmin):
+    list_display = ("asset", "as_of_date", "total_value", "unit_price", "recorded_by", "created_at")
+    list_filter = ("as_of_date", "asset__asset_type")
+    search_fields = ("asset__title", "recorded_by__full_name")
+    readonly_fields = ("asset", "as_of_date", "total_value", "unit_price", "recorded_by", "created_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False

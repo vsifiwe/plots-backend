@@ -13,8 +13,11 @@ from rest_framework_simplejwt.tokens import RefreshToken
 
 from .serializers import (
     AssetCancelSerializer,
+    AssetAcquireSerializer,
     AssetReopenSerializer,
     AssetSerializer,
+    AssetValuationCreateSerializer,
+    AssetValuationSerializer,
     AssetWriteSerializer,
     LoginSerializer,
     LogoutSerializer,
@@ -35,6 +38,7 @@ from .serializers import (
 from .models import (
     Asset,
     AssetCommitment,
+    AssetValuation,
     Contribution,
     Member,
     RNITNav,
@@ -307,6 +311,11 @@ class AssetAcquireView(APIView):
                     {"detail": "Only open assets can be marked acquired."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            acquisition_serializer = AssetAcquireSerializer(
+                data=request.data,
+                context={"asset": asset},
+            )
+            acquisition_serializer.is_valid(raise_exception=True)
             commitments = list(
                 asset.commitments.filter(is_current=True).select_for_update().all()
             )
@@ -337,9 +346,60 @@ class AssetAcquireView(APIView):
                     nav=nav.nav_per_unit if nav else None,
                 )
             asset.status = Asset.Status.ACQUIRED
-            asset.save(update_fields=("status", "updated_at"))
+            asset.acquired_at = timezone.now()
+            if asset.asset_type == Asset.AssetType.VARIABLE:
+                asset.acquired_units = acquisition_serializer.validated_data["units"]
+                asset.acquisition_unit_price = acquisition_serializer.validated_data[
+                    "unit_price"
+                ]
+            asset.full_clean()
+            asset.save(
+                update_fields=(
+                    "status",
+                    "acquired_at",
+                    "acquired_units",
+                    "acquisition_unit_price",
+                    "updated_at",
+                )
+            )
 
         return Response(AssetSerializer(asset, context={"request": request}).data)
+
+
+class AssetValuationListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get_asset(self, asset_id):
+        return Asset.objects.filter(pk=asset_id).first()
+
+    def get(self, request, asset_id):
+        require_asset_steward(request.user)
+        asset = self.get_asset(asset_id)
+        if asset is None:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+        return Response(
+            AssetValuationSerializer(
+                asset.valuations.select_related("recorded_by").all(),
+                many=True,
+            ).data
+        )
+
+    def post(self, request, asset_id):
+        require_asset_steward(request.user)
+        with transaction.atomic():
+            asset = Asset.objects.select_for_update().filter(pk=asset_id).first()
+            if asset is None:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+            serializer = AssetValuationCreateSerializer(
+                data=request.data,
+                context={"asset": asset, "request": request},
+            )
+            serializer.is_valid(raise_exception=True)
+            valuation = serializer.save()
+        return Response(
+            AssetValuationSerializer(valuation).data,
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class AssetCancelView(APIView):

@@ -13,6 +13,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from .models import (
     Asset,
     AssetCommitment,
+    AssetValuation,
     Contribution,
     RNITNav,
     RNITPurchase,
@@ -321,6 +322,10 @@ def allocate_commitment_reserve(commitment, nav):
 
 class AssetWriteSerializer(serializers.Serializer):
     title = serializers.CharField(max_length=160, trim_whitespace=True)
+    asset_type = serializers.ChoiceField(
+        choices=Asset.AssetType.choices,
+        required=False,
+    )
     description = serializers.CharField(
         max_length=2000,
         required=False,
@@ -345,6 +350,7 @@ class AssetWriteSerializer(serializers.Serializer):
 
     def create(self, validated_data):
         commitments = validated_data.pop("commitments")
+        validated_data.setdefault("asset_type", Asset.AssetType.FIXED)
         asset = Asset.objects.create(
             created_by=self.context["request"].user,
             **validated_data,
@@ -364,9 +370,18 @@ class AssetWriteSerializer(serializers.Serializer):
     def update(self, asset, validated_data):
         commitments = validated_data.pop("commitments")
         asset.title = validated_data["title"]
+        asset.asset_type = validated_data.get("asset_type", asset.asset_type)
         asset.description = validated_data.get("description", "")
         asset.total_cost = validated_data["total_cost"]
-        asset.save(update_fields=("title", "description", "total_cost", "updated_at"))
+        asset.save(
+            update_fields=(
+                "title",
+                "asset_type",
+                "description",
+                "total_cost",
+                "updated_at",
+            )
+        )
 
         asset.commitments.filter(is_current=True).update(is_current=False)
         AssetCommitment.objects.bulk_create(
@@ -387,6 +402,8 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
     ownership_percentage = serializers.SerializerMethodField()
     is_reserved = serializers.BooleanField(read_only=True)
     live_reserved_value = serializers.SerializerMethodField()
+    current_value = serializers.SerializerMethodField()
+    growth = serializers.SerializerMethodField()
 
     def get_member(self, commitment):
         return {
@@ -402,6 +419,18 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
         return commitment.reserved_cash + float(
             commitment.reserved_units * (nav.nav_per_unit if nav else Decimal("0"))
         )
+
+    def get_current_value(self, commitment):
+        value = asset_current_value(commitment.asset)
+        if value is None:
+            return None
+        return float(value * Decimal(commitment.amount) / Decimal(commitment.asset.total_cost))
+
+    def get_growth(self, commitment):
+        current_value = self.get_current_value(commitment)
+        if current_value is None:
+            return None
+        return current_value - commitment.amount
 
     class Meta:
         model = AssetCommitment
@@ -421,7 +450,23 @@ class AssetCommitmentSerializer(serializers.ModelSerializer):
             "redeemed_at",
             "redemption_nav",
             "live_reserved_value",
+            "current_value",
+            "growth",
         )
+
+
+def latest_asset_valuation(asset):
+    return asset.valuations.order_by("-as_of_date", "-id").first()
+
+
+def asset_current_value(asset):
+    if asset.status != Asset.Status.ACQUIRED:
+        return None
+    valuation = latest_asset_valuation(asset)
+    if asset.asset_type == Asset.AssetType.VARIABLE:
+        unit_price = valuation.unit_price if valuation else asset.acquisition_unit_price
+        return asset.acquired_units * unit_price if unit_price is not None else None
+    return valuation.total_value if valuation else Decimal(asset.total_cost)
 
 
 class AssetSerializer(serializers.ModelSerializer):
@@ -430,6 +475,12 @@ class AssetSerializer(serializers.ModelSerializer):
     your_commitment = serializers.SerializerMethodField()
     commitments = serializers.SerializerMethodField()
     funding_issues = serializers.SerializerMethodField()
+    current_value = serializers.SerializerMethodField()
+    growth = serializers.SerializerMethodField()
+    growth_percentage = serializers.SerializerMethodField()
+    latest_valuation_date = serializers.SerializerMethodField()
+    latest_unit_price = serializers.SerializerMethodField()
+    valuations = serializers.SerializerMethodField()
 
     def can_manage_assets(self):
         request = self.context.get("request")
@@ -441,6 +492,7 @@ class AssetSerializer(serializers.ModelSerializer):
             fields.pop("commitments")
             fields.pop("funding_issues")
             fields.pop("cancellation_reason")
+            fields.pop("valuations")
         return fields
 
     def get_commitments_for_asset(self, asset):
@@ -462,6 +514,31 @@ class AssetSerializer(serializers.ModelSerializer):
             for commitment in self.get_commitments_for_asset(asset)
             if commitment.is_reserved
         )
+
+    def get_current_value(self, asset):
+        value = asset_current_value(asset)
+        return float(value) if value is not None else None
+
+    def get_growth(self, asset):
+        value = asset_current_value(asset)
+        return float(value - Decimal(asset.total_cost)) if value is not None else None
+
+    def get_growth_percentage(self, asset):
+        value = asset_current_value(asset)
+        if value is None:
+            return None
+        return round(float((value - Decimal(asset.total_cost)) * 100 / Decimal(asset.total_cost)), 2)
+
+    def get_latest_valuation_date(self, asset):
+        valuation = latest_asset_valuation(asset)
+        return valuation.as_of_date if valuation else None
+
+    def get_latest_unit_price(self, asset):
+        if asset.asset_type != Asset.AssetType.VARIABLE:
+            return None
+        valuation = latest_asset_valuation(asset)
+        price = valuation.unit_price if valuation else asset.acquisition_unit_price
+        return str(price) if price is not None else None
 
     def get_your_commitment(self, asset):
         request = self.context.get("request")
@@ -486,6 +563,9 @@ class AssetSerializer(serializers.ModelSerializer):
             return []
         return get_asset_funding_issues(asset)
 
+    def get_valuations(self, asset):
+        return AssetValuationSerializer(asset.valuations.all(), many=True).data
+
     class Meta:
         model = Asset
         fields = (
@@ -493,16 +573,123 @@ class AssetSerializer(serializers.ModelSerializer):
             "title",
             "description",
             "total_cost",
+            "asset_type",
             "status",
             "total_committed",
             "total_reserved",
             "your_commitment",
             "commitments",
             "funding_issues",
+            "acquired_at",
+            "acquired_units",
+            "acquisition_unit_price",
+            "current_value",
+            "growth",
+            "growth_percentage",
+            "latest_valuation_date",
+            "latest_unit_price",
+            "valuations",
             "created_at",
             "updated_at",
             "cancelled_at",
             "cancellation_reason",
+        )
+
+
+class AssetAcquireSerializer(serializers.Serializer):
+    units = serializers.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        min_value=Decimal("0.00000001"),
+        required=False,
+    )
+    unit_price = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        min_value=Decimal("0.00000001"),
+        required=False,
+    )
+
+    def validate(self, attrs):
+        asset = self.context["asset"]
+        if asset.asset_type == Asset.AssetType.FIXED:
+            if attrs.get("units") is not None or attrs.get("unit_price") is not None:
+                raise serializers.ValidationError(
+                    "Fixed assets do not use units or a unit price."
+                )
+            return attrs
+
+        units = attrs.get("units")
+        unit_price = attrs.get("unit_price")
+        if units is None or unit_price is None:
+            raise serializers.ValidationError(
+                {"units": "Enter the acquired units and their initial price."}
+            )
+        if units * unit_price != Decimal(asset.total_cost):
+            raise serializers.ValidationError(
+                {"unit_price": "Units multiplied by the initial price must equal the committed asset cost."}
+            )
+        return attrs
+
+
+class AssetValuationSerializer(serializers.ModelSerializer):
+    recorded_by = serializers.SerializerMethodField()
+
+    def get_recorded_by(self, valuation):
+        return {
+            "id": valuation.recorded_by_id,
+            "full_name": valuation.recorded_by.full_name,
+        }
+
+    class Meta:
+        model = AssetValuation
+        fields = (
+            "id",
+            "as_of_date",
+            "total_value",
+            "unit_price",
+            "recorded_by",
+            "created_at",
+        )
+
+
+class AssetValuationCreateSerializer(serializers.Serializer):
+    as_of_date = serializers.DateField()
+    total_value = serializers.DecimalField(
+        max_digits=24,
+        decimal_places=8,
+        min_value=Decimal("0.00000001"),
+        required=False,
+    )
+    unit_price = serializers.DecimalField(
+        max_digits=20,
+        decimal_places=8,
+        min_value=Decimal("0.00000001"),
+        required=False,
+    )
+
+    def validate(self, attrs):
+        asset = self.context["asset"]
+        if asset.status != Asset.Status.ACQUIRED:
+            raise serializers.ValidationError("Only acquired assets can receive valuations.")
+        if attrs["as_of_date"] > timezone.localdate():
+            raise serializers.ValidationError({"as_of_date": "A valuation cannot be future-dated."})
+        if asset.acquired_at and attrs["as_of_date"] < asset.acquired_at.date():
+            raise serializers.ValidationError({"as_of_date": "A valuation cannot predate acquisition."})
+        if AssetValuation.objects.filter(asset=asset, as_of_date=attrs["as_of_date"]).exists():
+            raise serializers.ValidationError({"as_of_date": "A valuation already exists for this date."})
+        if asset.asset_type == Asset.AssetType.FIXED:
+            if attrs.get("total_value") is None or attrs.get("unit_price") is not None:
+                raise serializers.ValidationError({"total_value": "Enter one total RWF valuation for this fixed asset."})
+        elif attrs.get("unit_price") is None or attrs.get("total_value") is not None:
+            raise serializers.ValidationError({"unit_price": "Enter one unit price for this variable asset."})
+        return attrs
+
+    def create(self, validated_data):
+        return AssetValuation.objects.create(
+            asset=self.context["asset"],
+            recorded_by=self.context["request"].user,
+            **validated_data,
         )
 
 

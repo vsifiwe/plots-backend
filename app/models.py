@@ -294,6 +294,10 @@ class RNITPurchase(models.Model):
 
 
 class Asset(models.Model):
+    class AssetType(models.TextChoices):
+        FIXED = "fixed", "Fixed"
+        VARIABLE = "variable", "Variable"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         OPEN = "open", "Open"
@@ -303,6 +307,11 @@ class Asset(models.Model):
     title = models.CharField(max_length=160)
     description = models.TextField(blank=True, max_length=2000)
     total_cost = models.PositiveBigIntegerField()
+    asset_type = models.CharField(
+        choices=AssetType.choices,
+        default=AssetType.FIXED,
+        max_length=16,
+    )
     status = models.CharField(
         choices=Status.choices,
         default=Status.DRAFT,
@@ -315,6 +324,19 @@ class Asset(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    acquired_at = models.DateTimeField(blank=True, null=True)
+    acquired_units = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=24,
+        decimal_places=8,
+    )
+    acquisition_unit_price = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=20,
+        decimal_places=8,
+    )
     cancelled_at = models.DateTimeField(blank=True, null=True)
     cancelled_by = models.ForeignKey(
         Member,
@@ -362,6 +384,99 @@ class Asset(models.Model):
 
     def __str__(self):
         return self.title
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.asset_type == self.AssetType.FIXED:
+            if self.acquired_units is not None or self.acquisition_unit_price is not None:
+                errors["asset_type"] = "Fixed assets cannot have unit purchase details."
+        elif self.status == self.Status.ACQUIRED:
+            if self.acquired_units is None:
+                errors["acquired_units"] = "Enter the units acquired for a variable asset."
+            if self.acquisition_unit_price is None:
+                errors["acquisition_unit_price"] = "Enter the initial unit price for a variable asset."
+            if (
+                self.acquired_units is not None
+                and self.acquisition_unit_price is not None
+                and self.acquired_units * self.acquisition_unit_price
+                != Decimal(self.total_cost)
+            ):
+                errors["acquisition_unit_price"] = (
+                    "Units multiplied by the initial price must equal the asset cost."
+                )
+        if errors:
+            raise ValidationError(errors)
+
+
+class AssetValuation(models.Model):
+    asset = models.ForeignKey(
+        Asset,
+        on_delete=models.PROTECT,
+        related_name="valuations",
+    )
+    as_of_date = models.DateField(db_index=True)
+    total_value = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=24,
+        decimal_places=8,
+    )
+    unit_price = models.DecimalField(
+        blank=True,
+        null=True,
+        max_digits=20,
+        decimal_places=8,
+    )
+    recorded_by = models.ForeignKey(
+        Member,
+        on_delete=models.PROTECT,
+        related_name="recorded_asset_valuations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ("-as_of_date", "-id")
+        constraints = [
+            models.UniqueConstraint(
+                fields=("asset", "as_of_date"),
+                name="asset_one_valuation_per_effective_date",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(total_value__isnull=False, unit_price__isnull=True)
+                    | Q(total_value__isnull=True, unit_price__isnull=False)
+                ),
+                name="asset_valuation_has_one_value",
+            ),
+            models.CheckConstraint(
+                condition=Q(total_value__isnull=True) | Q(total_value__gt=0),
+                name="asset_valuation_total_is_positive",
+            ),
+            models.CheckConstraint(
+                condition=Q(unit_price__isnull=True) | Q(unit_price__gt=0),
+                name="asset_valuation_unit_price_is_positive",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.asset_id:
+            if self.asset.status != Asset.Status.ACQUIRED:
+                errors["asset"] = "Only acquired assets can receive valuations."
+            if self.asset.acquired_at and self.as_of_date < self.asset.acquired_at.date():
+                errors["as_of_date"] = "A valuation cannot predate acquisition."
+            if self.asset.asset_type == Asset.AssetType.FIXED:
+                if self.total_value is None or self.unit_price is not None:
+                    errors["total_value"] = "Fixed assets require one total valuation in RWF."
+            elif self.unit_price is None or self.total_value is not None:
+                errors["unit_price"] = "Variable assets require one unit price."
+        if errors:
+            raise ValidationError(errors)
+
+    def __str__(self):
+        return f"{self.asset.title} · {self.as_of_date}"
 
 
 class AssetCommitment(models.Model):
