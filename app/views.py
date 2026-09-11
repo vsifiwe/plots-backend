@@ -52,6 +52,7 @@ from .models import (
     get_member_pending_cash,
     get_member_total_units,
 )
+from .overview import build_overview_summary
 
 
 class LoginView(APIView):
@@ -88,6 +89,13 @@ class MemberListCreateView(APIView):
             MemberDirectorySerializer(member).data,
             status=status.HTTP_201_CREATED,
         )
+
+
+class OverviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(build_overview_summary())
 
 
 class ContributionPagination(PageNumberPagination):

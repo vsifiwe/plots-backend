@@ -29,6 +29,7 @@ from app.views import (
     ContributionListCreateView,
     ContributionVoidView,
     MemberListCreateView,
+    OverviewView,
     RNITNavListCreateView,
     RNITPendingContributionView,
     RNITPurchaseCreateView,
@@ -41,6 +42,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path("api/auth/", include("app.urls")),
     path("api/members/", MemberListCreateView.as_view(), name="member-list-create"),
+    path("api/overview/", OverviewView.as_view(), name="overview"),
     path(
         "api/contributions/",
         ContributionListCreateView.as_view(),

@@ -629,7 +629,15 @@ def get_member_pending_cash(member_id, *, exclude_id=None):
         )
         if not has_active_purchase:
             total += Decimal(contribution.amount)
-    return total
+
+    redeemed_cash = (
+        AssetCommitment.objects.filter(
+            member_id=member_id,
+            redeemed_at__isnull=False,
+        ).aggregate(total=Sum("reserved_cash"))["total"]
+        or 0
+    )
+    return total - Decimal(redeemed_cash)
 
 
 def get_member_total_units(member_id):
