@@ -1,0 +1,45 @@
+# Plots and Prosper backend
+
+The backend is a Django API. The [GitHub Actions workflow](.github/workflows/backend.yml) tests the Docker image on pull requests and `main`. Successful runs on `main` deploy over SSH. To retry manually, select **Actions → Backend CI and deploy → Run workflow** and choose `main`.
+
+## Set up production
+
+1. Use a Linux `amd64` server with Docker Engine, the Docker Compose v2 plugin, Bash, and `flock` (from `util-linux`). Give the deployment SSH account access to Docker without `sudo`. Password SSH must be reachable from GitHub-hosted runners on port 22.
+2. Point the API hostname at the server and make TCP ports 80 and 443 available to Caddy. If you publish an AAAA record, route it to the server too. Caddy obtains the public certificate and redirects HTTP to HTTPS.
+3. As the deployment SSH user, create the configuration directory and file in the SSH login directory, normally that user's home. On the server, run:
+
+   ```bash
+   umask 077
+   mkdir -p .plotsandprosper
+   chmod 700 .plotsandprosper
+   ```
+
+   Save a mode `600` file at `.plotsandprosper/production.env` using [the example](deploy/production.env.example). Set `API_HOSTNAME` to the public API hostname without a scheme or port. Generate `DJANGO_SECRET_KEY` once with `openssl rand -hex 32` and keep it between deployments. Set `FRONTEND_ORIGIN` to the frontend's full HTTPS origin when available. For multiple allowed origins, use a comma-separated list. Set `NEXT_PUBLIC_API_BASE_URL` to the HTTPS API URL when building the frontend.
+4. In the backend repository, create the `production` environment under **Settings → Environments** and restrict deployments to the `main` branch. Add these environment secrets:
+
+   | Secret | Value |
+   | --- | --- |
+   | `SSH_HOST` | Hostname or IP address reachable by the runner |
+   | `SSH_USER` | Deployment account name |
+   | `SSH_PASSWORD` | Deployment account password |
+   | `SSH_KNOWN_HOSTS` | A complete OpenSSH known-hosts line for `SSH_HOST` |
+
+   To construct `SSH_KNOWN_HOSTS`, use the server console or another authenticated management channel to read the public host key, for example `/etc/ssh/ssh_host_ed25519_key.pub`. Prefix its key type and public key with the exact `SSH_HOST` value, as in `server.example.com ssh-ed25519 AAAA…`.
+
+After the first deployment passes its HTTPS check, create the initial Django admin interactively as the deployment user:
+
+```bash
+cd .plotsandprosper
+release=$(cat current)
+docker compose --project-name plotsandprosper \
+  --env-file production.env --env-file "releases/$release/release.env" \
+  -f "releases/$release/compose.yml" exec backend python manage.py createsuperuser
+```
+
+The prompt asks for an email address, full name, and password. Sign in at `/admin/` on the API hostname.
+
+## Deployments and data
+
+The first run creates a fresh database. Subsequent runs briefly stop Caddy and Gunicorn, create a consistent SQLite backup in the `plotsandprosper_database` Docker volume, and migrate that copy. If migration or the internal health check fails, the deploy script starts the prior image on the previous database. Once the replacement is ready to accept traffic, a failed public HTTPS check reports a failed workflow while keeping that release's database active.
+
+The `current` file identifies the active release. Its database file is `/data/<release>.sqlite3` inside the volume. Release files, images, and previous database snapshots accumulate on the server. Back up the active SQLite database to independent storage and periodically remove old snapshots, release directories, and unused images while preserving the active release and any copies you intend to retain. Never run `docker compose down -v` on production because it removes the SQLite and Caddy volumes.

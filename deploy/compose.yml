@@ -1,0 +1,46 @@
+services:
+  backend:
+    image: ${APP_IMAGE:?Set the release image}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      DJANGO_SETTINGS_MODULE: core.production
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?Set the Django secret key}
+      DJANGO_DB_PATH: ${DJANGO_DB_PATH:?Set the release database path}
+      API_HOSTNAME: ${API_HOSTNAME:?Set the API hostname}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
+    volumes:
+      - database:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import http.client, os
+          conn = http.client.HTTPConnection('127.0.0.1', 8000, timeout=2)
+          conn.request('GET', '/healthz/', headers={
+              'Host': os.environ['API_HOSTNAME'], 'X-Forwarded-Proto': 'https',
+          })
+          raise SystemExit(conn.getresponse().status != 200)
+      interval: 3s
+      timeout: 4s
+      retries: 10
+
+  caddy:
+    image: caddy:2.11.9-alpine
+    restart: unless-stopped
+    environment:
+      API_HOSTNAME: ${API_HOSTNAME:?Set the API hostname}
+    ports:
+      - "${HTTP_BIND:-80}:80"
+      - "${HTTPS_BIND:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  database:
+  caddy-data:
+  caddy-config:

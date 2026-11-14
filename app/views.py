@@ -1,8 +1,11 @@
 from decimal import Decimal, ROUND_DOWN
 
-from django.db import transaction
+from django.db import DatabaseError, transaction
 from django.db.models import Sum
+from django.http import JsonResponse
 from django.utils import timezone
+from django.views.decorators.cache import never_cache
+from django.views.decorators.http import require_GET
 from rest_framework import status
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.pagination import PageNumberPagination
@@ -53,6 +56,16 @@ from .models import (
     get_member_total_units,
 )
 from .overview import build_overview_summary
+
+
+@never_cache
+@require_GET
+def health_check(request):
+    try:
+        Member.objects.exists()
+    except DatabaseError:
+        return JsonResponse({"status": "unavailable"}, status=503)
+    return JsonResponse({"status": "ok"})
 
 
 class LoginView(APIView):

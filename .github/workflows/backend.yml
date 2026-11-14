@@ -1,0 +1,131 @@
+name: Backend CI and deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      IMAGE: plotsandprosper-backend:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Build and test the release image
+        run: |
+          docker build --platform linux/amd64 --tag "$IMAGE" .
+          docker run --rm "$IMAGE" python manage.py test --noinput
+          docker run --rm --user 0 "$IMAGE" python manage.py makemigrations --check --dry-run
+      - name: Verify Compose and SQLite rollback
+        run: bash deploy/verify-release.sh "$GITHUB_SHA"
+      - name: Package the verified release
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          mkdir release
+          docker image save "$IMAGE" | gzip > release/backend.tar.gz
+          cp deploy/{Caddyfile,compose.yml,release.sh} release/
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        with:
+          name: backend-${{ github.sha }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          overwrite: true
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: verify
+    runs-on: ubuntu-24.04
+    environment: production
+    timeout-minutes: 20
+    concurrency:
+      group: backend-production
+      queue: max
+    steps:
+      - name: Check whether the release is still current
+        id: main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$main_sha" == "$GITHUB_SHA" ]]; then
+            echo 'deploy=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'Skipping this commit because main has moved.'
+          fi
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5.0.0
+        if: steps.main.outputs.deploy == 'true'
+        with:
+          name: backend-${{ github.sha }}
+          path: release
+      - name: Install password SSH client support
+        if: steps.main.outputs.deploy == 'true'
+        run: |
+          if ! command -v sshpass >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y sshpass
+          fi
+      - name: Upload and activate the release
+        if: steps.main.outputs.deploy == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSHPASS: ${{ secrets.SSH_PASSWORD }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          : "${SSH_HOST:?Missing SSH_HOST}" "${SSH_USER:?Missing SSH_USER}" \
+            "${SSHPASS:?Missing SSH_PASSWORD}" "${SSH_KNOWN_HOSTS:?Missing SSH_KNOWN_HOSTS}"
+          umask 077
+          known_hosts=$(mktemp)
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$known_hosts"
+
+          remote() {
+            sshpass -e ssh -F /dev/null -p 22 -l "$SSH_USER" \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" \
+              -o GlobalKnownHostsFile=/dev/null -o PreferredAuthentications=password \
+              -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 \
+              -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- "$SSH_HOST" "$@"
+          }
+
+          remote_bundle=''
+          cleanup() {
+            if [[ -n "$remote_bundle" ]]; then
+              remote "rm -rf -- '$remote_bundle'" || true
+            fi
+            rm -f -- "$known_hosts"
+          }
+          trap cleanup EXIT
+
+          bundle_path=$(remote 'umask 077; test -f .plotsandprosper/production.env && mktemp -d .plotsandprosper/incoming.XXXXXXXX')
+          [[ "$bundle_path" =~ ^\.plotsandprosper/incoming\.[a-zA-Z0-9]+$ ]]
+          remote_bundle=$bundle_path
+          tar -C release -cf - backend.tar.gz compose.yml Caddyfile release.sh \
+            | remote "tar -xf - -C '$remote_bundle'"
+
+          main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
+          if [[ "$main_sha" != "$GITHUB_SHA" ]]; then
+            echo 'Skipping activation because main moved during upload.'
+            exit 0
+          fi
+
+          health_url=$(remote "bash '$remote_bundle/release.sh' .plotsandprosper '$GITHUB_SHA' '$remote_bundle'")
+          if ! curl --proto '=https' --fail --silent --show-error --retry 10 \
+            --retry-all-errors --retry-max-time 120 --max-time 10 "$health_url" \
+            | jq -e '.status == "ok"'; then
+            echo 'The release is active, but its public HTTPS health check failed.' >&2
+            exit 1
+          fi

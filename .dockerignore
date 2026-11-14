@@ -1,0 +1,11 @@
+**
+!app/
+!app/**
+!core/
+!core/**
+!manage.py
+!requirements.txt
+!deploy/
+!deploy/database.py
+**/__pycache__/
+**/*.py[cod]

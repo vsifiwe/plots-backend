@@ -36,9 +36,11 @@ from app.views import (
     RNITPurchaseListView,
     RNITPurchaseReverseView,
     SavingsSummaryView,
+    health_check,
 )
 
 urlpatterns = [
+    path("healthz/", health_check, name="health-check"),
     path('admin/', admin.site.urls),
     path("api/auth/", include("app.urls")),
     path("api/members/", MemberListCreateView.as_view(), name="member-list-create"),
