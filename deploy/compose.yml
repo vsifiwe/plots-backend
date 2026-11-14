@@ -11,6 +11,8 @@ services:
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
     volumes:
       - database:/data
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     healthcheck:
       test:
         - CMD
@@ -27,20 +29,5 @@ services:
       timeout: 4s
       retries: 10
 
-  caddy:
-    image: caddy:2.11.9-alpine
-    restart: unless-stopped
-    environment:
-      API_HOSTNAME: ${API_HOSTNAME:?Set the API hostname}
-    ports:
-      - "${HTTP_BIND:-80}:80"
-      - "${HTTPS_BIND:-443}:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
-
 volumes:
   database:
-  caddy-data:
-  caddy-config:

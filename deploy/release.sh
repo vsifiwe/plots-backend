@@ -46,13 +46,13 @@ recover() {
     set +e
     if [[ $runtime_replaced == true ]]; then
         compose "$release_name" logs --tail 30 backend
-        if ! compose "$release_name" stop caddy backend; then
+        if ! compose "$release_name" stop backend; then
             echo 'Could not stop the failed release. Inspect Compose before restoring service.'
             exit "$status"
         fi
         if [[ -n $previous ]]; then
             echo "Restoring $previous"
-            if ! start_backend "$previous" || ! compose "$previous" up -d caddy; then
+            if ! start_backend "$previous"; then
                 echo 'Automatic recovery failed. Inspect Compose and the release in current.'
             fi
         fi
@@ -64,29 +64,28 @@ trap 'exit 1' HUP INT TERM
 
 mkdir -p "$root/releases"
 mkdir "$release"
-cp "$bundle/compose.yml" "$bundle/Caddyfile" "$release/"
+cp "$bundle/compose.yml" "$release/"
 printf 'APP_IMAGE=plotsandprosper-backend:%s\nDJANGO_DB_PATH=%s\n' "$release_name" "$database" > "$release/release.env"
 
 docker image load -i "$bundle/backend.tar.gz"
 # A retry of the same commit can rebuild its SHA tag. Keep the prior image addressable.
 docker image tag "plotsandprosper-backend:$sha" "plotsandprosper-backend:$release_name"
 compose "$release_name" config --quiet
-compose "$release_name" pull --policy missing caddy
-compose "$release_name" run --rm -T --no-deps caddy caddy validate --config /etc/caddy/Caddyfile
 hostname=$(compose "$release_name" run --rm -T --no-deps backend python -c \
     'from core.production import API_HOSTNAME; print(API_HOSTNAME)')
 
 runtime_replaced=true
-compose "${previous:-$release_name}" stop caddy backend
+compose "${previous:-$release_name}" stop backend
 if [[ -n $previous ]]; then
     compose "$release_name" run --rm -T --no-deps backend \
         python deploy/database.py "/data/$previous.sqlite3" "$database"
 fi
 compose "$release_name" run --rm -T --no-deps backend python manage.py migrate --noinput
-start_backend "$release_name"
+# Let Docker choose a loopback port for the candidate so Caddy cannot route to it yet.
+BACKEND_PORT=0 start_backend "$release_name"
 
 # Once the new database can receive public writes, it must remain the live one.
 printf '%s\n' "$release_name" > "$root/current.next"
 mv -f "$root/current.next" "$root/current"
-compose "$release_name" up -d caddy
+start_backend "$release_name"
 printf 'https://%s/healthz/\n' "$hostname" >&3

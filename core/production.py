@@ -33,7 +33,7 @@ DATABASES = {
 STATIC_URL = "/static/"
 MIDDLEWARE = [MIDDLEWARE[0], "whitenoise.middleware.WhiteNoiseMiddleware", *MIDDLEWARE[1:]]
 
-# Gunicorn is reachable only from the Compose network. Caddy sets this header.
+# Caddy connects to Gunicorn over the host's loopback interface and sets this header.
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SECURE_SSL_REDIRECT = True
 SECURE_HSTS_SECONDS = 31536000

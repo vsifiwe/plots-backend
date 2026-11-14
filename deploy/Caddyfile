@@ -1,3 +1,4 @@
-{$API_HOSTNAME} {
-	reverse_proxy backend:8000
+# Use this site block in the existing server Caddyfile with the public API hostname.
+api.example.com {
+	reverse_proxy 127.0.0.1:8000
 }

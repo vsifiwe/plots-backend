@@ -44,47 +44,37 @@ mkdir -p "$(dirname "$production_env")"
 cat > "$production_env" <<'EOF'
 API_HOSTNAME=localhost
 DJANGO_SECRET_KEY=ci-only-django-secret-key-NzajbpeYU1Gj6pQGpZD6yqeSYaQ7wbD
-HTTP_BIND=127.0.0.1:
-HTTPS_BIND=127.0.0.1:
 EOF
+backend_port=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+printf 'BACKEND_PORT=%s\n' "$backend_port" >> "$production_env"
 
 package() {
     bundle=$(mktemp -d "$root/incoming.XXXXXXXX")
-    cp deploy/Caddyfile deploy/compose.yml "$bundle/"
+    cp deploy/compose.yml "$bundle/"
     docker image save "plotsandprosper-backend:$1" | gzip > "$bundle/backend.tar.gz"
 }
 
-check_https() {
-    local address attempt
-    address=$(compose_current port caddy 443)
-    # Use Caddy's disposable local CA to verify HTTPS without public DNS.
-    for ((attempt = 0; attempt < 15; attempt++)); do
-        if compose_current exec -T caddy cat /data/caddy/pki/authorities/local/root.crt \
-            > "$root/root.crt" 2>/dev/null && [[ -s $root/root.crt ]]; then
-            break
-        fi
-        sleep 1
+check_backend() {
+    local address path
+    address=$(compose_current port backend 8000)
+    [[ $address == "127.0.0.1:$backend_port" ]]
+    for path in /healthz/ /admin/login/ /static/admin/css/base.css; do
+        curl --fail --silent --show-error --max-time 5 \
+            -H 'Host: localhost' -H 'X-Forwarded-Proto: https' "http://$address$path" > /dev/null
     done
-    test -s "$root/root.crt"
-    curl --fail --silent --show-error --retry 15 --retry-all-errors --retry-delay 1 --max-time 5 \
-        --cacert "$root/root.crt" "https://localhost:${address##*:}/healthz/"
-    curl --fail --silent --show-error --max-time 5 --cacert "$root/root.crt" \
-        "https://localhost:${address##*:}/admin/login/" > /dev/null
-    curl --fail --silent --show-error --max-time 5 --cacert "$root/root.crt" \
-        "https://localhost:${address##*:}/static/admin/css/base.css" > /dev/null
 }
 
 docker tag "$base_image" "plotsandprosper-backend:$first"
 package "$first"
 bash deploy/release.sh "$root" "$first" "$bundle" "$production_env"
-check_https
+check_backend
 compose_current exec -T backend python manage.py shell -c \
     'from app.models import Member; Member.objects.create_user(email="deployment-test@example.com", full_name="Deployment Test", password="ci-only-password")'
 
 docker tag "$base_image" "plotsandprosper-backend:$second"
 package "$second"
 bash deploy/release.sh "$root" "$second" "$bundle" "$production_env"
-check_https
+check_backend
 stable_release=$(cat "$root/current")
 
 check_record() {
@@ -110,5 +100,5 @@ if [[ $(cat "$root/current") != "$stable_release" ]] ||
     echo 'The failure did not restore the prior release.' >&2
     exit 1
 fi
-check_https
+check_backend
 check_record

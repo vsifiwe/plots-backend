@@ -33,7 +33,7 @@ jobs:
         run: |
           mkdir release
           docker image save "$IMAGE" | gzip > release/backend.tar.gz
-          cp deploy/{Caddyfile,compose.yml,release.sh} release/
+          cp deploy/{compose.yml,release.sh} release/
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
         with:
@@ -121,7 +121,7 @@ jobs:
             exit 1
           fi
           remote_bundle=$bundle_path
-          tar -C release -cf - backend.tar.gz compose.yml Caddyfile release.sh \
+          tar -C release -cf - backend.tar.gz compose.yml release.sh \
             | remote "tar -xf - -C '$remote_bundle'"
 
           main_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq '.object.sha')
