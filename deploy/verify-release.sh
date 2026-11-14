@@ -4,6 +4,7 @@ set -Eeuo pipefail
 sha=$1
 root=$(mktemp -d)
 root=$(cd "$root" && pwd -P)
+production_env="$root/etc/plots/production.env"
 export COMPOSE_PROJECT_NAME="plotsandprosper-test-$$"
 
 first=$(openssl rand -hex 20)
@@ -15,7 +16,7 @@ compose_current() {
     local current
     current=$(cat "$root/current")
     docker compose --project-name "$COMPOSE_PROJECT_NAME" \
-        --env-file "$root/production.env" --env-file "$root/releases/$current/release.env" \
+        --env-file "$production_env" --env-file "$root/releases/$current/release.env" \
         -f "$root/releases/$current/compose.yml" "$@"
 }
 
@@ -26,7 +27,7 @@ cleanup() {
     elif [[ -n ${bundle:-} ]]; then
         APP_IMAGE="$base_image" DJANGO_DB_PATH=/data/test.sqlite3 \
             docker compose --project-name "$COMPOSE_PROJECT_NAME" \
-                --env-file "$root/production.env" -f "$bundle/compose.yml" down -v >/dev/null || true
+                --env-file "$production_env" -f "$bundle/compose.yml" down -v >/dev/null || true
     fi
     docker image rm "plotsandprosper-backend:$first" "plotsandprosper-backend:$second" \
         "plotsandprosper-backend:$broken" >/dev/null 2>&1 || true
@@ -39,7 +40,8 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "$root/production.env" <<'EOF'
+mkdir -p "$(dirname "$production_env")"
+cat > "$production_env" <<'EOF'
 API_HOSTNAME=localhost
 DJANGO_SECRET_KEY=ci-only-django-secret-key-NzajbpeYU1Gj6pQGpZD6yqeSYaQ7wbD
 HTTP_BIND=127.0.0.1:
@@ -74,14 +76,14 @@ check_https() {
 
 docker tag "$base_image" "plotsandprosper-backend:$first"
 package "$first"
-bash deploy/release.sh "$root" "$first" "$bundle"
+bash deploy/release.sh "$root" "$first" "$bundle" "$production_env"
 check_https
 compose_current exec -T backend python manage.py shell -c \
     'from app.models import Member; Member.objects.create_user(email="deployment-test@example.com", full_name="Deployment Test", password="ci-only-password")'
 
 docker tag "$base_image" "plotsandprosper-backend:$second"
 package "$second"
-bash deploy/release.sh "$root" "$second" "$bundle"
+bash deploy/release.sh "$root" "$second" "$bundle" "$production_env"
 check_https
 stable_release=$(cat "$root/current")
 
@@ -98,7 +100,7 @@ CMD ["python", "-c", "import time; time.sleep(120)"]
 EOF
 package "$broken"
 echo 'The following release is expected to fail its internal health check.'
-if bash deploy/release.sh "$root" "$broken" "$bundle" 2> "$root/failed-release.log"; then
+if bash deploy/release.sh "$root" "$broken" "$bundle" "$production_env" 2> "$root/failed-release.log"; then
     echo 'The intentionally unhealthy release was accepted.' >&2
     exit 1
 fi

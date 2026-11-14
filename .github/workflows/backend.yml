@@ -107,8 +107,19 @@ jobs:
           }
           trap cleanup EXIT
 
-          bundle_path=$(remote 'umask 077; test -f .plotsandprosper/production.env && mktemp -d .plotsandprosper/incoming.XXXXXXXX')
-          [[ "$bundle_path" =~ ^\.plotsandprosper/incoming\.[a-zA-Z0-9]+$ ]]
+          production_env=/etc/plots/production.env
+          bundle_path=$(remote "
+            if [ ! -f '$production_env' ] || [ ! -r '$production_env' ]; then
+              echo 'Create $production_env on the server and make it readable by the SSH user.' >&2
+              exit 1
+            fi
+            umask 077
+            mkdir -p .plotsandprosper && mktemp -d .plotsandprosper/incoming.XXXXXXXX
+          ")
+          if [[ ! "$bundle_path" =~ ^\.plotsandprosper/incoming\.[a-zA-Z0-9]+$ ]]; then
+            echo 'SSH returned an unexpected upload directory. Check the SSH login output.' >&2
+            exit 1
+          fi
           remote_bundle=$bundle_path
           tar -C release -cf - backend.tar.gz compose.yml Caddyfile release.sh \
             | remote "tar -xf - -C '$remote_bundle'"
@@ -119,7 +130,7 @@ jobs:
             exit 0
           fi
 
-          health_url=$(remote "bash '$remote_bundle/release.sh' .plotsandprosper '$GITHUB_SHA' '$remote_bundle'")
+          health_url=$(remote "bash '$remote_bundle/release.sh' .plotsandprosper '$GITHUB_SHA' '$remote_bundle' '$production_env'")
           if ! curl --proto '=https' --fail --silent --show-error --retry 10 \
             --retry-all-errors --retry-max-time 120 --max-time 10 "$health_url" \
             | jq -e '.status == "ok"'; then

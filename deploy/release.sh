@@ -5,6 +5,7 @@ umask 077
 root=$(cd "$1" && pwd)
 sha=$2
 bundle=$(cd "$3" && pwd)
+production_env=$4
 [[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid commit SHA' >&2; exit 1; }
 
 # Reserve standard output for the health URL returned to the GitHub runner.
@@ -27,7 +28,7 @@ compose() {
     local selected=$1
     shift
     docker compose --project-name "${COMPOSE_PROJECT_NAME:-plotsandprosper}" \
-        --env-file "$root/production.env" --env-file "$root/releases/$selected/release.env" \
+        --env-file "$production_env" --env-file "$root/releases/$selected/release.env" \
         -f "$root/releases/$selected/compose.yml" "$@"
 }
 

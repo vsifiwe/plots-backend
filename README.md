@@ -6,15 +6,17 @@ The backend is a Django API. The [GitHub Actions workflow](.github/workflows/bac
 
 1. Use a Linux `amd64` server with Docker Engine, the Docker Compose v2 plugin, Bash, and `flock` (from `util-linux`). Give the deployment SSH account access to Docker without `sudo`. Password SSH must be reachable from GitHub-hosted runners on port 22.
 2. Point the API hostname at the server and make TCP ports 80 and 443 available to Caddy. If you publish an AAAA record, route it to the server too. Caddy obtains the public certificate and redirects HTTP to HTTPS.
-3. As the deployment SSH user, create the configuration directory and file in the SSH login directory, normally that user's home. On the server, run:
+3. Save the configuration on the server at `/etc/plots/production.env`. Run these commands as the deployment SSH user if it has `sudo` access, or have a server administrator create the file with mode `600` and make the SSH user its owner.
 
    ```bash
-   umask 077
-   mkdir -p .plotsandprosper
-   chmod 700 .plotsandprosper
+   sudo install -d -m 755 /etc/plots
+   sudo touch /etc/plots/production.env
+   sudo chmod 600 /etc/plots/production.env
+   sudo chown "$(id -u):$(id -g)" /etc/plots/production.env
+   nano /etc/plots/production.env
    ```
 
-   Save a mode `600` file at `.plotsandprosper/production.env` using [the example](deploy/production.env.example). Set `API_HOSTNAME` to the public API hostname without a scheme or port. Generate `DJANGO_SECRET_KEY` once with `openssl rand -hex 32` and keep it between deployments. Set `FRONTEND_ORIGIN` to the frontend's full HTTPS origin when available. For multiple allowed origins, use a comma-separated list. Set `NEXT_PUBLIC_API_BASE_URL` to the HTTPS API URL when building the frontend.
+   Use [the example](deploy/production.env.example) to fill in the file. Set `API_HOSTNAME` to the public API hostname without a scheme or port. Generate `DJANGO_SECRET_KEY` once with `openssl rand -hex 32` and keep it between deployments. If you already created a production file, copy its values to the new path. Set `FRONTEND_ORIGIN` to the frontend's full HTTPS origin when available. For multiple allowed origins, use a comma-separated list. Set `NEXT_PUBLIC_API_BASE_URL` to the HTTPS API URL when building the frontend.
 4. In the backend repository, create the `production` environment under **Settings → Environments** and restrict deployments to the `main` branch. Add these environment secrets:
 
    | Secret | Value |
@@ -31,7 +33,7 @@ After the first deployment passes its HTTPS check, create the initial Django adm
 cd .plotsandprosper
 release=$(cat current)
 docker compose --project-name plotsandprosper \
-  --env-file production.env --env-file "releases/$release/release.env" \
+  --env-file /etc/plots/production.env --env-file "releases/$release/release.env" \
   -f "releases/$release/compose.yml" exec backend python manage.py createsuperuser
 ```
 
