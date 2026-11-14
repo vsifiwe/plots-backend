@@ -85,17 +85,14 @@ jobs:
           SSH_HOST: ${{ secrets.SSH_HOST }}
           SSH_USER: ${{ secrets.SSH_USER }}
           SSHPASS: ${{ secrets.SSH_PASSWORD }}
-          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
         run: |
-          : "${SSH_HOST:?Missing SSH_HOST}" "${SSH_USER:?Missing SSH_USER}" \
-            "${SSHPASS:?Missing SSH_PASSWORD}" "${SSH_KNOWN_HOSTS:?Missing SSH_KNOWN_HOSTS}"
+          : "${SSH_HOST:?Missing SSH_HOST}" "${SSH_USER:?Missing SSH_USER}" "${SSHPASS:?Missing SSH_PASSWORD}"
           umask 077
           known_hosts=$(mktemp)
-          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$known_hosts"
 
           remote() {
             sshpass -e ssh -F /dev/null -p 22 -l "$SSH_USER" \
-              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts" \
+              -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$known_hosts" \
               -o GlobalKnownHostsFile=/dev/null -o PreferredAuthentications=password \
               -o NumberOfPasswordPrompts=1 -o ConnectTimeout=15 \
               -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -- "$SSH_HOST" "$@"

@@ -22,9 +22,8 @@ The backend is a Django API. The [GitHub Actions workflow](.github/workflows/bac
    | `SSH_HOST` | Hostname or IP address reachable by the runner |
    | `SSH_USER` | Deployment account name |
    | `SSH_PASSWORD` | Deployment account password |
-   | `SSH_KNOWN_HOSTS` | A complete OpenSSH known-hosts line for `SSH_HOST` |
 
-   To construct `SSH_KNOWN_HOSTS`, use the server console or another authenticated management channel to read the public host key, for example `/etc/ssh/ssh_host_ed25519_key.pub`. Prefix its key type and public key with the exact `SSH_HOST` value, as in `server.example.com ssh-ed25519 AAAA…`.
+   Each deployment job trusts the SSH host key on its first connection and rejects host key changes for the rest of that job.
 
 After the first deployment passes its HTTPS check, create the initial Django admin interactively as the deployment user:
 
