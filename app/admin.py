@@ -55,6 +55,7 @@ class MemberAdmin(admin.ModelAdmin):
     list_filter = ("role", "is_active", "is_staff", "is_superuser")
     search_fields = ("full_name", "email", "phone")
     ordering = ("full_name", "email", "phone")
+    readonly_fields = ("date_joined",)
     fieldsets = (
         (None, {"fields": ("full_name", "email", "phone", "password")} ),
         ("Member role", {"fields": ("role",)}),

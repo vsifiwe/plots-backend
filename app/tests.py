@@ -6,6 +6,8 @@ from unittest.mock import patch
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
 
+from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APISimpleTestCase, APITestCase
@@ -26,6 +28,39 @@ FIXED_TODAY = date(2026, 9, 12)
 
 def aware_datetime(year, month, day):
     return timezone.make_aware(datetime(year, month, day, 12, 0))
+
+
+class MemberAdminTests(TestCase):
+    def test_member_change_page_displays_join_date_and_saves_edits(self):
+        steward = Member.objects.create_superuser(
+            email="admin@example.com", password="admin-test-password", full_name="Admin"
+        )
+        member = Member.objects.create_user(
+            phone="0781234567", password="member-test-password", full_name="Member"
+        )
+        self.client.force_login(steward)
+        url = reverse("admin:app_member_change", args=[member.pk])
+
+        response = self.client.get(url)
+
+        self.assertContains(response, "Date joined")
+        self.assertNotIn("date_joined", response.context["adminform"].form.fields)
+
+        response = self.client.post(url, {
+            "full_name": "Updated Member",
+            "phone": member.phone,
+            "role": member.role,
+            "is_active": "on",
+            "_save": "Save",
+        })
+
+        self.assertRedirects(response, reverse("admin:app_member_changelist"))
+        date_joined = member.date_joined
+        password_hash = member.password
+        member.refresh_from_db()
+        self.assertEqual(member.full_name, "Updated Member")
+        self.assertEqual(member.date_joined, date_joined)
+        self.assertEqual(member.password, password_hash)
 
 
 class RNITPublishedNavTests(APISimpleTestCase):
