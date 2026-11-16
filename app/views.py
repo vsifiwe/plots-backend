@@ -56,6 +56,7 @@ from .models import (
     get_member_total_units,
 )
 from .overview import build_overview_summary
+from .rnit import RNITHistoryUnavailable, list_recent_published_navs
 
 
 @never_cache
@@ -589,6 +590,20 @@ class RNITNavListCreateView(APIView):
         serializer.is_valid(raise_exception=True)
         nav = serializer.save()
         return Response(RNITNavSerializer(nav).data, status=status.HTTP_201_CREATED)
+
+
+class RNITPublishedNavListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        require_asset_steward(request.user)
+        try:
+            return Response(list_recent_published_navs(timezone.localdate()))
+        except RNITHistoryUnavailable:
+            return Response(
+                {"detail": "RNIT NAV history is unavailable."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
 
 class RNITPendingContributionView(APIView):

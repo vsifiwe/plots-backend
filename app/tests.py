@@ -1,10 +1,14 @@
+import json
 from datetime import date, datetime
 from decimal import Decimal
+from io import BytesIO
 from unittest.mock import patch
+from urllib.error import URLError
+from urllib.parse import parse_qs, urlsplit
 
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.test import APITestCase
+from rest_framework.test import APISimpleTestCase, APITestCase
 
 from .models import (
     Asset,
@@ -22,6 +26,57 @@ FIXED_TODAY = date(2026, 9, 12)
 
 def aware_datetime(year, month, day):
     return timezone.make_aware(datetime(year, month, day, 12, 0))
+
+
+class RNITPublishedNavTests(APISimpleTestCase):
+    url = "/api/savings/navs/published/"
+
+    @staticmethod
+    def feed_response(dates):
+        return BytesIO(json.dumps({
+            "ok": True,
+            "entries": [{"nav_date": day, "nav_value": "286.7500"} for day in dates],
+        }).encode())
+
+    @patch("app.rnit.urlopen")
+    def test_only_stewards_can_request_published_navs(self, urlopen):
+        self.assertEqual(self.client.get(self.url).status_code, status.HTTP_401_UNAUTHORIZED)
+        self.client.force_authenticate(Member(role=Member.Role.MEMBER))
+        self.assertEqual(self.client.get(self.url).status_code, status.HTTP_403_FORBIDDEN)
+        urlopen.assert_not_called()
+
+    @patch("app.views.timezone.localdate", return_value=date(2027, 1, 5))
+    @patch("app.rnit.urlopen")
+    def test_latest_seven_can_span_years(self, urlopen, _localdate):
+        self.client.force_authenticate(Member(role=Member.Role.STEWARD))
+        urlopen.side_effect = [
+            self.feed_response(["2027-01-05", "2027-01-04", "2027-01-06", "2027-01-05"]),
+            self.feed_response([f"2026-12-{day}" for day in range(23, 32)]),
+        ]
+
+        response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        dates = ["2027-01-05", "2027-01-04"] + [f"2026-12-{day}" for day in range(31, 26, -1)]
+        self.assertEqual(
+            response.json(),
+            [{"as_of_date": day, "nav_per_unit": "286.7500"} for day in dates],
+        )
+        requests = [call.args[0] for call in urlopen.call_args_list]
+        self.assertEqual(
+            [parse_qs(urlsplit(request.full_url).query) for request in requests],
+            [{"history": ["1"], "year": ["2027"]}, {"history": ["1"], "year": ["2026"]}],
+        )
+        self.assertTrue(all(request.get_header("User-agent") for request in requests))
+
+    @patch("app.rnit.urlopen")
+    def test_feed_failures_return_bad_gateway(self, urlopen):
+        self.client.force_authenticate(Member(role=Member.Role.STEWARD))
+        urlopen.side_effect = [URLError("Offline"), BytesIO(b"not JSON")]
+
+        for _ in range(2):
+            response = self.client.get(self.url)
+            self.assertEqual(response.status_code, status.HTTP_502_BAD_GATEWAY)
 
 
 class OverviewTestCase(APITestCase):
